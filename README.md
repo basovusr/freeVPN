@@ -347,19 +347,5 @@ Web 面板：<http://127.0.0.1:9090/ui>
 ## License
 
 [MIT](LICENSE)
----
+basovusr
 
-## 发布到 GitHub
-
-仓库自带推送脚本，会自动创建远程仓库、配置 remote 并推送：
-
-```powershell
-cd scripts
-.\\push-to-github.ps1 -User "你的GitHub用户名" -Token "ghp_xxxxxxxx"
-```
-
-Token 需在 <https://github.com/settings/tokens> 生成（classic 类型，勾选 `repo`）。
-脚本不会保存 Token，推送后会立即把它从 remote URL 中移除。
-
-> 注意：`bin/`（内核与规则数据）和 `logs/` 已在 `.gitignore` 中排除，
-> 克隆后首次运行会自动下载；`config/config.runtime.yaml` 含节点信息，同样不会上传。
