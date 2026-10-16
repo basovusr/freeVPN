@@ -1,0 +1,142 @@
+# ============================================================
+#  freeVPN 手机配置 (FlClash / ClashMetaForAndroid)
+# ============================================================
+#  上游: Cloudflare WARP (免费)
+#  协议: WireGuard (mihomo 内核原生支持, 无需额外 App)
+#
+#  与电脑版的区别:
+#    电脑版走 MASQUE over QUIC 443 (有线宽带封了 WireGuard 的 UDP 2408)
+#    手机版直接走 WireGuard UDP 2408 —— 运营商网络策略不同
+#
+#  导入后若所有国外网站都打不开, 说明当前网络封了 UDP 2408,
+#  需要改用 MASQUE 方案。
+#
+#  本文件由脚本生成, 修改后请勿手改, 重新生成即可。
+# ============================================================
+
+mixed-port: 7890
+allow-lan: false
+mode: rule
+log-level: warning
+ipv6: false
+
+# ---------- DNS 防污染 ----------
+dns:
+  enable: true
+  ipv6: false
+  enhanced-mode: fake-ip
+  fake-ip-range: 198.18.0.1/16
+  fake-ip-filter:
+    - "*.lan"
+    - "*.local"
+    - "+.msftconnecttest.com"
+    - "+.msftncsi.com"
+    - "time.*.com"
+    - "ntp.*.com"
+    - "+.pool.ntp.org"
+    - "stun.*.*"
+  default-nameserver:
+    - 223.5.5.5
+    - 119.29.29.29
+  nameserver:
+    - https://223.5.5.5/dns-query
+    - https://1.12.12.12/dns-query
+    - https://doh.pub/dns-query
+  proxy-server-nameserver:
+    - https://223.5.5.5/dns-query
+  nameserver-policy:
+    "geosite:cn,private":
+      - https://223.5.5.5/dns-query
+      - https://1.12.12.12/dns-query
+    "geosite:geolocation-!cn":
+      - https://1.1.1.1/dns-query
+      - https://8.8.8.8/dns-query
+  fallback:
+    - https://1.1.1.1/dns-query
+    - https://8.8.8.8/dns-query
+    - https://223.5.5.5/dns-query
+  fallback-filter:
+    geoip: true
+    geoip-code: CN
+    ipcidr:
+      - 240.0.0.0/4
+  fallback-timeout: 800
+
+# ---------- 上游节点 ----------
+proxies:
+  - name: "WARP-手机"
+    type: wireguard
+    server: 162.159.192.1
+    port: 2408
+    ip: 172.16.0.2/32
+    private-key: "sEpFRT110Gy6OA2+UIf3a74atacmEijkSQPii99H8E4="
+    public-key: "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo="
+    udp: true
+    mtu: 1280
+    # WARP 必需项: Cloudflare 靠这 3 个字节在握手时识别客户端, 缺失会失败
+    reserved: [254, 14, 128]
+  - name: "WARP-备用端点"
+    type: wireguard
+    server: 162.159.193.1
+    port: 2408
+    ip: 172.16.0.2/32
+    private-key: "sEpFRT110Gy6OA2+UIf3a74atacmEijkSQPii99H8E4="
+    public-key: "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo="
+    udp: true
+    mtu: 1280
+    # WARP 必需项: Cloudflare 靠这 3 个字节在握手时识别客户端, 缺失会失败
+    reserved: [254, 14, 128]
+
+proxy-groups:
+  - name: PROXY
+    type: select
+    proxies: ["自动选择", "WARP-手机", "WARP-备用端点", DIRECT]
+
+  - name: 自动选择
+    type: url-test
+    url: https://www.gstatic.com/generate_204
+    interval: 300
+    tolerance: 100
+    timeout: 8000
+    proxies: ["WARP-手机", "WARP-备用端点"]
+
+  - name: 故障转移
+    type: fallback
+    url: https://www.gstatic.com/generate_204
+    interval: 300
+    timeout: 8000
+    proxies: ["WARP-手机", "WARP-备用端点", DIRECT]
+
+  - name: AI
+    type: select
+    proxies: ["自动选择", PROXY, DIRECT]
+
+  - name: 广告拦截
+    type: select
+    proxies: [REJECT, DIRECT]
+
+# ---------- 分流规则 ----------
+rules:
+  - GEOSITE,category-ads-all,广告拦截
+  - GEOIP,private,DIRECT,no-resolve
+  - GEOSITE,openai,AI
+  - GEOSITE,anthropic,AI
+  - GEOSITE,google-gemini,AI
+  - GEOSITE,category-ai-!cn,AI
+  - GEOSITE,github,PROXY
+  - GEOSITE,gfw,PROXY
+  - GEOSITE,geolocation-!cn,PROXY
+  - GEOSITE,cn,DIRECT
+  - GEOSITE,private,DIRECT
+  - GEOIP,CN,DIRECT
+  - MATCH,PROXY
+
+# ---------- 规则数据 ----------
+geodata-mode: true
+geox-url:
+  geoip: "https://ghproxy.net/https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geoip.dat"
+  geosite: "https://ghproxy.net/https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geosite.dat"
+
+profile:
+  store-selected: true
+  store-fake-ip: true
