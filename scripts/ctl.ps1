@@ -382,9 +382,9 @@ function Action-Start {
   $rc = Get-RunConfig
   $rcTxt = ''
   if (Test-Path $rc) { $rcTxt = Read-File $rc }
-  if ($rcTxt -match 'WARP-' -and -not (Test-WarpRunning)) {
-    Warn 'config has WARP node but tunnel is down; starting WARP...'
-    Action-WarpStart
+  if ($rcTxt -match 'WARP-') {
+    # 自包含：没装就装、没注册就注册、没跑就跑
+    Invoke-EnsureWarp | Out-Null
   }
 
   Info ('等待端口 ' + $MixedPort + ' 就绪 (最多 ' + $TimeoutSec + ' 秒)...')
@@ -406,6 +406,31 @@ function Action-Start {
   Ok ('代理已就绪: 127.0.0.1:' + $MixedPort + ' (HTTP + SOCKS5)')
   Head '连通性自检'
   Test-Egress
+
+  # ---------- 熔断保护 ----------
+  # 关键：只有端到端探测通过才开启系统代理。
+  # 否则会把对方的浏览器指向一个没有出口的端口，等于把他的网搞坏。
+  Head '检查是否可安全接管系统代理'
+  if (Test-ProxyEgress) {
+    Ok '出口正常，开启系统代理'
+    Invoke-SetSystemProxy -Enable | Out-Null
+    $p = (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings').ProxyServer
+    Ok ('系统代理已开启: ' + $p)
+  } else {
+    if (Get-SystemProxyEnabled) {
+      Invoke-SetSystemProxy | Out-Null   # 关掉
+      Warn '探测未通过，已确保系统代理处于【关闭】状态（不会影响你的正常上网）'
+    } else {
+      Warn '探测未通过，系统代理保持【关闭】'
+    }
+    Write-Host ''
+    Err '上游不通，暂不接管系统代理 —— 你的网络仍可正常使用（国内网站直连）'
+    Info '请先解决上游问题，再重新运行本脚本。排查顺序:'
+    Info '   1. .\ctl.ps1 -Action WarpStatus   看隧道是否就绪'
+    Info '   2. .\ctl.ps1 -Action WarpStop 然后 -Action WarpStart  重建连接'
+    Info '   3. .\diag.ps1                     完整诊断'
+    Info '常见原因: 当前网络封了 MASQUE(QUIC 443)，或 WARP 被限速'
+  }
 }
 
 function Action-Stop {
@@ -563,10 +588,25 @@ function Action-Update {
 
 # ==================== WARP (free MASQUE tunnel) ====================
 function Get-WarpDir {
+  # 先找项目内自带组件（便于整个文件夹拷给别人直接用），找不到再回退用户目录
+  $local = Join-Path $BinDir 'warp'
+  if (Test-Path (Join-Path $local 'usque.exe')) { return $local }
   $c = Join-Path $env:LOCALAPPDATA 'WARP'
   if (Test-Path (Join-Path $c 'bin\usque.exe')) { return $c }
   return $null
 }
+function Get-UsqueExe {
+  # 兼容两种布局：
+  #   项目自包含: <项目>\bin\warp\usque.exe
+  #   用户目录:   %LOCALAPPDATA%\WARP\bin\usque.exe
+  param([string]$Dir)
+  $a = Join-Path $Dir 'bin\usque.exe'
+  if (Test-Path $a) { return $a }
+  $b = Join-Path $Dir 'usque.exe'
+  if (Test-Path $b) { return $b }
+  return $null
+}
+
 function Test-WarpRunning {
   $c = Get-NetTCPConnection -LocalPort 1080 -State Listen -ErrorAction SilentlyContinue
   return [bool]$c
@@ -665,12 +705,19 @@ function Action-WarpRegister {
   $out = ''
   $okR = $false
   Push-Location $d
+  # 关键: usque 会把「Config file not found」写到 stderr, 而这是首次注册的正常
+  # 提示(它随后会完成注册)。$ErrorActionPreference=Stop 会把 stderr 当成终止性
+  # 错误, 使脚本在注册完成前中断 —— 实测踩到过。这里临时放宽, 并只以
+  # 「config.json 是否生成」作为成功判据。
+  $prevEAP = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
   try {
-    $out = (& (Join-Path $d 'bin\usque.exe') register --accept-tos --name 'DSH-LocalProxy' 2>&1 | Out-String)
-    $okR = Test-Path $cfgp
+    $out = (& (Get-UsqueExe -Dir $d) register --accept-tos --name 'DSH-LocalProxy' 2>&1 | Out-String)
   } catch {
     $out = $_.Exception.Message
   }
+  $ErrorActionPreference = $prevEAP
+  $okR = Test-Path $cfgp
   Pop-Location
   if ($okR) { Ok '注册成功'; Action-WarpStatus }
   else { Err '注册失败:'; Write-Host $out -ForegroundColor DarkYellow }
@@ -686,7 +733,7 @@ function Action-WarpStart {
   $elog = Join-Path $LogDir 'warp.err.log'
   $a = @('socks', '-b', '127.0.0.1', '-p', '1080', '-P', '443',
          '-s', 'consumer-masque.cloudflareclient.com', '--always-reconnect')
-  $p = Start-Process -FilePath (Join-Path $d 'bin\usque.exe') -ArgumentList $a `
+  $p = Start-Process -FilePath (Get-UsqueExe -Dir $d) -ArgumentList $a `
        -WorkingDirectory $d -WindowStyle Hidden -PassThru `
        -RedirectStandardOutput (Join-Path $LogDir 'warp.log') -RedirectStandardError $elog
   Ok ('WARP 进程已启动 (PID ' + $p.Id + ')')
@@ -717,6 +764,70 @@ function Action-WarpStop {
   if (Test-WarpRunning) { Warn '端口 1080 仍被占用' } else { Ok 'WARP 已停止' }
   Warn '提醒: WARP 停止后若 PROXY 仍指向 "WARP-免费"，国外网站将打不开'
   Info '切回直连: .\ctl.ps1 -Action Switch -Group PROXY -Node DIRECT'
+}
+
+function Test-ProxyEgress {
+  # 端到端探测：经 7890 混合端口访问 Google。
+  # 用于「熔断保护」——探测不过就不开系统代理，避免把对方的浏览器搞坏。
+  param([int]$TimeoutSec = 18)
+  try {
+    $r = & curl.exe -s -o NUL -x 'http://127.0.0.1:7890' `
+         -w '%{http_code}' --max-time $TimeoutSec `
+         'https://www.google.com/generate_204' 2>$null
+    return ($r -in @('200', '204', '301', '302'))
+  } catch { return $false }
+}
+
+function Invoke-SetSystemProxy {
+  # 用独立 powershell 进程调用 system-proxy.ps1，并显式带 -ExecutionPolicy Bypass。
+  # 原因: Windows 默认执行策略是 Restricted。若用户不用 .bat 而是直接开 PowerShell
+  # 跑 ctl.ps1，进程内策略可能是 Restricted，点调用子脚本会被拦。
+  # 独立进程 + Bypass 可彻底消除这个不确定性。
+  param([switch]$Enable)
+  $sp = Join-Path $PSScriptRoot 'system-proxy.ps1'
+  if (-not (Test-Path $sp)) { return $false }
+  try {
+    $verb = if ($Enable) { '-Enable' } else { '-Disable' }
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $sp $verb -Quiet | Out-Null
+    return $true
+  } catch { return $false }
+}
+
+function Get-SystemProxyEnabled {
+  try {
+    $v = (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings').ProxyEnable
+    return ($v -eq 1)
+  } catch { return $false }
+}
+
+function Invoke-EnsureWarp {
+  # 让上游就绪：没装就装，没注册就注册，没跑就跑。
+  # 返回 $true 表示 1080 端口已在监听。
+  if (Test-WarpRunning) { Ok 'WARP 隧道已在运行'; return $true }
+
+  if (-not (Get-WarpDir)) {
+    Warn '未检测到 WARP 组件，正在自动安装（首次约 5 MB）...'
+    Action-WarpInstall
+    if (-not (Get-WarpDir)) {
+      Err 'WARP 组件安装失败'
+      Info '手动重试: .\ctl.ps1 -Action WarpInstall'
+      return $false
+    }
+  }
+
+  $d = Get-WarpDir
+  if (-not (Test-Path (Join-Path $d 'config.json'))) {
+    Warn '未检测到 WARP 账号，正在自动注册（免费）...'
+    Action-WarpRegister
+    if (-not (Test-Path (Join-Path $d 'config.json'))) {
+      Err 'WARP 账号注册失败'
+      Info '手动重试: .\ctl.ps1 -Action WarpRegister'
+      return $false
+    }
+  }
+
+  Action-WarpStart
+  return (Test-WarpRunning)
 }
 
 switch ($Action) {

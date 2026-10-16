@@ -1,5 +1,13 @@
 # ---- 二进制与运行时数据（首次运行自动下载，不入库）----
 bin/*.exe
+# 注意: "bin/*.exe" 只匹配一层目录。usque.exe 在 bin/warp/ 下，
+# 必须用 "bin/**" 覆盖子目录，否则会把 12MB 的 Windows 二进制提交进仓库。
+bin/**/*.exe
+bin/**/*.dat
+bin/**/*.metadb
+bin/**/*.zip
+bin/**/LICENSE.md
+bin/**/README.md
 bin/*.dat
 bin/*.metadb
 bin/*.zip
