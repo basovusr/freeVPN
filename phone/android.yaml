@@ -2,16 +2,15 @@
 #  freeVPN 手机配置 (FlClash / ClashMetaForAndroid)
 # ============================================================
 #  上游: Cloudflare WARP (免费)
-#  协议: WireGuard (mihomo 内核原生支持, 无需额外 App)
 #
-#  与电脑版的区别:
-#    电脑版走 MASQUE over QUIC 443 (有线宽带封了 WireGuard 的 UDP 2408)
-#    手机版直接走 WireGuard UDP 2408 —— 运营商网络策略不同
+#  本配置同时提供两种传输, 由内核自动挑选可用的那个:
+#    WARP-MASQUE       走 QUIC 443, 能穿透封锁 UDP 2408 的网络 (推荐)
+#    WARP-WireGuard    走 UDP 2408, 未封锁时更快
 #
-#  导入后若所有国外网站都打不开, 说明当前网络封了 UDP 2408,
-#  需要改用 MASQUE 方案。
+#  自动选择 / 故障转移 组会测延迟并选最快的可用节点,
+#  全部不可用时退回 DIRECT (不会导致完全断网)。
 #
-#  本文件由脚本生成, 修改后请勿手改, 重新生成即可。
+#  导入方式: 直接填 URL 导入, 之后会自动更新
 # ============================================================
 
 mixed-port: 7890
@@ -64,7 +63,8 @@ dns:
 
 # ---------- 上游节点 ----------
 proxies:
-  - name: "WARP-手机"
+  # WireGuard 端点：若运营商没封 UDP 2408 会更快
+  - name: "WARP-WireGuard"
     type: wireguard
     server: 162.159.192.1
     port: 2408
@@ -73,9 +73,9 @@ proxies:
     public-key: "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo="
     udp: true
     mtu: 1280
-    # WARP 必需项: Cloudflare 靠这 3 个字节在握手时识别客户端, 缺失会失败
     reserved: [254, 14, 128]
-  - name: "WARP-备用端点"
+
+  - name: "WARP-WireGuard-备"
     type: wireguard
     server: 162.159.193.1
     port: 2408
@@ -84,28 +84,55 @@ proxies:
     public-key: "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo="
     udp: true
     mtu: 1280
-    # WARP 必需项: Cloudflare 靠这 3 个字节在握手时识别客户端, 缺失会失败
     reserved: [254, 14, 128]
+
+  # MASQUE 端点：走 QUIC 443，与普通 HTTPS 流量难以区分，
+  # 实测能穿透封锁 UDP 2408 的网络（推荐）
+  - name: "WARP-MASQUE"
+    type: masque
+    server: 162.159.198.2
+    port: 443
+    private-key: "MHcCAQEEICNuogZpRAGOIdRovpXVnGaqEvaGMVNLY5cFr+hHMFWaoAoGCCqGSM49AwEHoUQDQgAEW2PsopfHcYM/79jTJdLU3jifqq0CdQkCHns1YFBsc4J2r6EEsE3eotE3mAcGjgQ3IOLA7mQfb/R8dPnzonjEvw=="
+    public-key: "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEIaU7MToJm9NKp8YfGxR6r+/h4mcG7SxI8tsW8OR1A5tv/zCzVbCRRh2t87/kxnP6lAy0lkr7qYwu+ox+k3dr6w=="
+    ip: 172.16.0.2
+    ipv6: 2606:4700:110:881a:7805:d348:197:895c
+    mtu: 1280
+    udp: true
+
+  # MASQUE over HTTP/2，QUIC 被限速时的备选
+  - name: "WARP-MASQUE-H2"
+    type: masque
+    server: 162.159.198.2
+    port: 443
+    network: h2
+    private-key: "MHcCAQEEICNuogZpRAGOIdRovpXVnGaqEvaGMVNLY5cFr+hHMFWaoAoGCCqGSM49AwEHoUQDQgAEW2PsopfHcYM/79jTJdLU3jifqq0CdQkCHns1YFBsc4J2r6EEsE3eotE3mAcGjgQ3IOLA7mQfb/R8dPnzonjEvw=="
+    public-key: "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEIaU7MToJm9NKp8YfGxR6r+/h4mcG7SxI8tsW8OR1A5tv/zCzVbCRRh2t87/kxnP6lAy0lkr7qYwu+ox+k3dr6w=="
+    ip: 172.16.0.2
+    ipv6: 2606:4700:110:881a:7805:d348:197:895c
+    mtu: 1280
+    udp: true
 
 proxy-groups:
   - name: PROXY
     type: select
-    proxies: ["自动选择", "WARP-手机", "WARP-备用端点", DIRECT]
+    proxies: ["自动选择", "WARP-MASQUE", "WARP-WireGuard", "故障转移", DIRECT]
 
+  # 自动挑延迟最低的可用节点；MASQUE 放前面，网络封 2408 时它会胜出
   - name: 自动选择
     type: url-test
     url: https://www.gstatic.com/generate_204
     interval: 300
-    tolerance: 100
-    timeout: 8000
-    proxies: ["WARP-手机", "WARP-备用端点"]
+    tolerance: 150
+    timeout: 10000
+    proxies: ["WARP-MASQUE", "WARP-WireGuard", "WARP-MASQUE-H2", "WARP-WireGuard-备"]
 
+  # 依次尝试，全挂则退回直连
   - name: 故障转移
     type: fallback
     url: https://www.gstatic.com/generate_204
     interval: 300
-    timeout: 8000
-    proxies: ["WARP-手机", "WARP-备用端点", DIRECT]
+    timeout: 10000
+    proxies: ["WARP-MASQUE", "WARP-WireGuard", "WARP-MASQUE-H2", "WARP-WireGuard-备", DIRECT]
 
   - name: AI
     type: select
