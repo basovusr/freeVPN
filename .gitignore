@@ -1,0 +1,48 @@
+# ---- 二进制与运行时数据（首次运行自动下载，不入库）----
+bin/*.exe
+bin/*.dat
+bin/*.metadb
+bin/*.zip
+bin/ui/
+bin/cache.db
+bin/VERSION.txt
+
+# ---- 日志与运行时状态 ----
+logs/
+*.log
+*.pid
+
+# ---- 生成的运行时配置（含上游信息，切勿提交）----
+config/config.runtime.yaml
+config/config.verify.yaml
+config/config.forceproxy.yaml
+config/_verify/
+config/_test_dns.yaml
+config/provider.yaml
+
+# ---- 订阅内容（含隐私信息，绝对不要提交）----
+subscriptions/
+providers/
+*.yaml.bak
+
+# ---- WARP 账号凭据（含私钥，绝对不要提交）----
+config.json
+warp-config.json
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini
+
+# ---- 敏感文件保险 ----
+*.key
+*.pem
+.env

@@ -1,0 +1,50 @@
+# ============================================================
+#  行尾与编码策略 —— 这个文件对项目至关重要，请勿删除
+# ============================================================
+#  背景: 项目文件对行尾/编码有硬性要求
+#    * .bat  必须是 CRLF，否则 cmd.exe 解析错位（中文会变成"锟斤拷"）
+#    * .ps1  必须是 UTF-8 带 BOM，否则 PowerShell 5.1 在中文区域会按 GBK 解码报错
+#    * .bat  必须是 GBK 编码（中文 Windows 控制台默认代码页 936）
+#  如果不锁定行尾，git 在不同平台克隆后可能改成 LF，直接导致脚本失效。
+# ============================================================
+
+# 默认不做任何行尾转换，避免误伤
+* -text
+
+# Windows 批处理：强制 CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# PowerShell：强制 CRLF（BOM 由文件本身携带，git 不会改动已有 BOM）
+*.ps1 text eol=crlf
+*.psm1 text eol=crlf
+
+# 文档：仓库内统一 LF
+*.md   text eol=lf
+*.txt  text eol=lf
+
+# 配置文件：LF，避免解析歧义
+*.yaml text eol=lf
+*.yml  text eol=lf
+*.json text eol=lf
+
+# Python：LF
+*.py text eol=lf
+
+# 二进制文件，禁止任何转换
+*.exe   binary
+*.dll   binary
+*.dat   binary
+*.metadb binary
+*.zip   binary
+*.png   binary
+*.jpg   binary
+*.ico   binary
+
+# 语言统计：不要在文档/批处理里统计
+*.md   linguist-documentation
+*.bat  linguist-language=Batchfile
+
+# 差异展示
+*.ps1 diff=ps1
+*.bat diff=batch
