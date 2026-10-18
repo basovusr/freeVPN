@@ -155,6 +155,19 @@ proxy-groups:
 
 # ---------- 分流规则 ----------
 rules:
+  # ---- WebRTC / STUN 封堵（放在最前，优先级最高）----
+  # 原理: STUN 是 WebRTC 用来发现公网 IP 的协议, 走 UDP。
+  # 手机上 FlClash 用 VpnService 接管全部流量, 所以用端口规则
+  # 就能把这些流量强制塞进隧道, 网页拿到的将是 WARP 的出口 IP。
+  # 注意: 只封端口, 不影响国内网站的访问速度。
+  - DST-PORT,3478,PROXY
+  - DST-PORT,5349,PROXY
+  - DST-PORT,19302,PROXY
+  - DST-PORT,19305,PROXY
+  - DST-PORT,19307,PROXY
+  - DST-PORT,19308,PROXY
+  - DST-PORT,19309,PROXY
+
   - GEOSITE,category-ads-all,广告拦截
   - GEOIP,private,DIRECT,no-resolve
   - GEOSITE,openai,AI
