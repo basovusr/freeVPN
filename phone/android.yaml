@@ -1,19 +1,19 @@
 # ============================================================
-#  freeVPN 手机配置 —— 隐私加固版
+#  freeVPN 手机配置 —— 分流版
 # ============================================================
-#  目标: 让所有对外访问都看不出真实 IP。
+#  策略:
+#    国内网站  -> 直连，速度优先，不隐藏 IP
+#    国外网站  -> 全部经 WARP，隐藏真实 IP
 #
-#  三重防护:
-#    1. 全隧道    所有流量(含国内)经 WARP，只有局域网直连
-#    2. IPv6 接管 开启 ipv6，让虚拟网卡把 IPv6 也一起接住
-#    3. STUN 封堵 WebRTC 用的 UDP 端口强制走隧道
+#  同时堵住两个与"分流"无关的泄漏点:
+#    1. IPv6: 开启 ipv6 让虚拟网卡接管 IPv6。
+#       若关闭，运营商分配的 IPv6 会绕过 VPN，
+#       无论访问国内还是国外都会暴露真实地址。
+#    2. WebRTC/STUN: 用端口规则把 STUN 强制塞进隧道。
+#       网页用 JS 查 STUN 就能拿到公网 IP，与走哪条路无关。
 #
-#  ⚠ 代价: 国内网站也会绕道海外，百度从 0.06s 变成 2s 左右。
-#     若要恢复速度，把文件末尾 rules 里的 GEOSITE,cn,DIRECT
-#     那两行注释去掉即可（但国内网站就会看到你的真实 IP）。
-#
-#  ⚠ 没有 DIRECT 退路: WARP 挂掉时会直接断网，而不是悄悄用真实 IP。
-#     这是有意的 —— 宁可断网也不泄漏。
+#  国外流量没有直连退路: WARP 挂掉时国外站点会打不开，
+#  而不是静默退回真实 IP。国内站点不受影响。
 # ============================================================
 
 mixed-port: 7890
@@ -21,19 +21,22 @@ allow-lan: false
 mode: rule
 log-level: warning
 
-# ---- IPv6 总开关 ----
-# 必须为 true: FlClash 只在 ipv6=true 时才给虚拟网卡加 IPv6 路由。
-# 若为 false，手机会用运营商分配的 IPv6 直接出网，真实 IP 立刻暴露。
+# ---- IPv6 总开关: 必须为 true ----
+# FlClash 的 VpnService.kt 只在 ipv6=true 时才给虚拟网卡加 IPv6 路由，
+# 否则日志写 "IPv6 VPN address is not supported" 且不加路由,
+# 手机就会用运营商的 IPv6 直接出网, 真实 IP 立刻暴露。
 ipv6: true
 
 # ---------- DNS ----------
 dns:
   enable: true
-  # 开启才能在隧道内处理 AAAA 记录
-  ipv6: true
+  # 不返回 AAAA 记录: 让 App 走 IPv4,
+  # 这样国外流量走隧道里更可靠的 IPv4 通道。
+  # 注意这只影响"域名解析结果", 不影响 IPv6 是否被隧道接管 ——
+  # 接管由上面的 ipv6: true 负责。
+  ipv6: false
   enhanced-mode: fake-ip
   fake-ip-range: 198.18.0.1/16
-  # IPv6 的假 IP 池
   fake-ip-range6: fdfe:dcba:9876::1/64
   fake-ip-filter:
     - "*.lan"
@@ -47,9 +50,9 @@ dns:
   default-nameserver:
     - 223.5.5.5
     - 119.29.29.29
-  # 只用国内可达的解析器。fake-ip 模式下这里只决定"要不要真解析"，
-  # 真实解析由代理隧道内部完成，所以不会造成污染；
-  # 但若写成国外 DoH(1.1.1.1)，代理未就绪时会全部超时。
+  # 只用国内可达的解析器。fake-ip 模式下这里只决定"要不要真解析",
+  # 真实解析由代理隧道内部完成(remote-dns-resolve), 所以不会造成污染;
+  # 若写成国外 DoH(1.1.1.1), 代理未就绪时会全部超时。
   nameserver:
     - https://223.5.5.5/dns-query
     - https://1.12.12.12/dns-query
@@ -83,8 +86,8 @@ proxies:
     mtu: 1280
     udp: true
     # 关键：MASQUE 是 IP 隧道，必须先把域名解析成 IP。
-    # 默认用本机 DNS 解析，国内 DNS 对 google.com 返回投毒结果，
-    # 于是拿着假 IP 去连接必然超时。开启后域名在隧道内用 1.1.1.1 解析。
+    # 默认用本机 DNS 解析，而国内 DNS 对 google.com 返回投毒结果，
+    # 隧道会拿着假 IP 去连接并超时。开启后域名在隧道内用 1.1.1.1 解析。
     remote-dns-resolve: true
     dns: [1.1.1.1, 1.0.0.1]
     handshake-timeout: 30
@@ -94,7 +97,8 @@ proxy-groups:
     type: select
     proxies: ["自动选择", "WARP-MASQUE", "WARP-WireGuard"]
 
-  # 自动挑延迟最低的可用节点。刻意不放 DIRECT: 失败就失败，不泄漏。
+  # 自动挑延迟最低的可用节点。
+  # 刻意不放 DIRECT: 国外流量失败就失败, 绝不静默退回真实 IP。
   - name: 自动选择
     type: url-test
     url: https://www.gstatic.com/generate_204
@@ -103,7 +107,6 @@ proxy-groups:
     timeout: 10000
     proxies: ["WARP-MASQUE", "WARP-WireGuard"]
 
-  # 依次尝试，全部失败则断网（不退回直连）
   - name: 故障转移
     type: fallback
     url: https://www.gstatic.com/generate_204
@@ -121,9 +124,9 @@ proxy-groups:
 
 # ---------- 规则 ----------
 rules:
-  # ---- 1. WebRTC / STUN 封堵（最高优先级）----
-  # STUN 用 UDP 发现公网 IP。手机端 TUN 能看到这些包，
-  # 用端口规则强制塞进隧道，网页拿到的就是 WARP 的出口 IP。
+  # ---- 1. WebRTC / STUN 封堵（最高优先级，与分流无关）----
+  # STUN 用来发现公网 IP。若不拦截，网页可通过 JS 拿到真实 IP，
+  # 哪怕它访问的站点本身走了代理。这里强制塞进隧道。
   - DST-PORT,3478,PROXY
   - DST-PORT,5349,PROXY
   - DST-PORT,19302,PROXY
@@ -131,10 +134,9 @@ rules:
   - DST-PORT,19307,PROXY
   - DST-PORT,19308,PROXY
   - DST-PORT,19309,PROXY
-  # 常见 WebRTC 媒体端口段（仅在命中时才走代理，不影响其它流量）
   - DST-PORT,50000-50100,PROXY
 
-  # ---- 2. 局域网/本机：必须直连（这些地址本来就不出公网）----
+  # ---- 2. 局域网 / 本机：直连（这些地址不出公网，无需隐藏）----
   - IP-CIDR,127.0.0.0/8,DIRECT,no-resolve
   - IP-CIDR,10.0.0.0/8,DIRECT,no-resolve
   - IP-CIDR,172.16.0.0/12,DIRECT,no-resolve
@@ -147,10 +149,12 @@ rules:
   # ---- 3. 广告拦截 ----
   - GEOSITE,category-ads-all,广告拦截
 
-  # ---- 4. 其余全部走 WARP（全隧道）----
-  # 如需恢复国内直连速度，取消下面两行注释即可（会暴露真实 IP）
-  # - GEOSITE,cn,DIRECT
-  # - GEOIP,CN,DIRECT
+  # ---- 4. 国内：直连，速度优先（按你的要求不隐藏 IP）----
+  - GEOSITE,cn,DIRECT
+  # 国内 IPv6 段也走直连(GEOIP 库含 IPv6，所以国内 IPv6 不会被绕去国外)
+  - GEOIP,CN,DIRECT
+
+  # ---- 5. 其余全部是国外：强制走 WARP，隐藏真实 IP ----
   - MATCH,PROXY
 
 # ---------- 规则数据 ----------
