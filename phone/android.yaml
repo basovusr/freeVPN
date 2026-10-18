@@ -1,30 +1,40 @@
 # ============================================================
-#  freeVPN 手机配置 (FlClash / ClashMetaForAndroid)
+#  freeVPN 手机配置 —— 隐私加固版
 # ============================================================
-#  上游: Cloudflare WARP (免费)
+#  目标: 让所有对外访问都看不出真实 IP。
 #
-#  本配置同时提供两种传输, 由内核自动挑选可用的那个:
-#    WARP-MASQUE       走 QUIC 443, 能穿透封锁 UDP 2408 的网络 (推荐)
-#    WARP-WireGuard    走 UDP 2408, 未封锁时更快
+#  三重防护:
+#    1. 全隧道    所有流量(含国内)经 WARP，只有局域网直连
+#    2. IPv6 接管 开启 ipv6，让虚拟网卡把 IPv6 也一起接住
+#    3. STUN 封堵 WebRTC 用的 UDP 端口强制走隧道
 #
-#  自动选择 / 故障转移 组会测延迟并选最快的可用节点,
-#  全部不可用时退回 DIRECT (不会导致完全断网)。
+#  ⚠ 代价: 国内网站也会绕道海外，百度从 0.06s 变成 2s 左右。
+#     若要恢复速度，把文件末尾 rules 里的 GEOSITE,cn,DIRECT
+#     那两行注释去掉即可（但国内网站就会看到你的真实 IP）。
 #
-#  导入方式: 直接填 URL 导入, 之后会自动更新
+#  ⚠ 没有 DIRECT 退路: WARP 挂掉时会直接断网，而不是悄悄用真实 IP。
+#     这是有意的 —— 宁可断网也不泄漏。
 # ============================================================
 
 mixed-port: 7890
 allow-lan: false
 mode: rule
 log-level: warning
-ipv6: false
 
-# ---------- DNS 防污染 ----------
+# ---- IPv6 总开关 ----
+# 必须为 true: FlClash 只在 ipv6=true 时才给虚拟网卡加 IPv6 路由。
+# 若为 false，手机会用运营商分配的 IPv6 直接出网，真实 IP 立刻暴露。
+ipv6: true
+
+# ---------- DNS ----------
 dns:
   enable: true
-  ipv6: false
+  # 开启才能在隧道内处理 AAAA 记录
+  ipv6: true
   enhanced-mode: fake-ip
   fake-ip-range: 198.18.0.1/16
+  # IPv6 的假 IP 池
+  fake-ip-range6: fdfe:dcba:9876::1/64
   fake-ip-filter:
     - "*.lan"
     - "*.local"
@@ -37,30 +47,19 @@ dns:
   default-nameserver:
     - 223.5.5.5
     - 119.29.29.29
+  # 只用国内可达的解析器。fake-ip 模式下这里只决定"要不要真解析"，
+  # 真实解析由代理隧道内部完成，所以不会造成污染；
+  # 但若写成国外 DoH(1.1.1.1)，代理未就绪时会全部超时。
   nameserver:
     - https://223.5.5.5/dns-query
     - https://1.12.12.12/dns-query
     - https://doh.pub/dns-query
   proxy-server-nameserver:
     - https://223.5.5.5/dns-query
-  # 关键: 国外域名也走国内可用的解析器。
-  # 在 fake-ip 模式下返回的只是假 IP, 真实解析由代理隧道内完成,
-  # 所以这里用国内 DNS 不会造成污染 —— 但如果写成国外 DoH,
-  # 代理尚未就绪时解析会直接失败, 导致健康检查无法通过、
-  # url-test 选不出节点, 形成死循环。
-  # 刻意不配置 nameserver-policy:
-  #   fake-ip 模式下, 被代理的域名应当只拿到一个假 IP (198.18.x.x),
-  #   真实解析由代理隧道内部完成 —— 这才是防污染的关键。
-  #   若在此显式指定解析器, mihomo 会去解析真实 IP,
-  #   国内 DNS 对 google.com 返回的是投毒结果 (实测 174.132.167.252 /
-  #   31.13.92.37), 代理就会拿着假 IP 去连接, 必然超时。
-  #   实测: 去掉本段后 Google / YouTube 才能正常访问。
-  # 不配置 fallback: 它指向的国外 DoH 在代理就绪前不可达,
-  # 会让每次解析都白等到超时。代理就绪后真实解析由隧道内完成。
 
 # ---------- 上游节点 ----------
 proxies:
-  # WireGuard 端点：若运营商没封 UDP 2408 会更快
+  # ---- WireGuard：运营商未封 UDP 2408 时更快 ----
   - name: "WARP-WireGuard"
     type: wireguard
     server: 162.159.192.1
@@ -72,19 +71,7 @@ proxies:
     mtu: 1280
     reserved: [254, 14, 128]
 
-  - name: "WARP-WireGuard-备"
-    type: wireguard
-    server: 162.159.193.1
-    port: 2408
-    ip: 172.16.0.2/32
-    private-key: "sEpFRT110Gy6OA2+UIf3a74atacmEijkSQPii99H8E4="
-    public-key: "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo="
-    udp: true
-    mtu: 1280
-    reserved: [254, 14, 128]
-
-  # MASQUE 端点：走 QUIC 443，与普通 HTTPS 流量难以区分，
-  # 实测能穿透封锁 UDP 2408 的网络（推荐）
+  # ---- MASQUE：走 QUIC 443，能穿透封锁 UDP 2408 的网络（实测可用）----
   - name: "WARP-MASQUE"
     type: masque
     server: 162.159.198.2
@@ -95,30 +82,9 @@ proxies:
     ipv6: 2606:4700:110:881a:7805:d348:197:895c
     mtu: 1280
     udp: true
-    # 关键: MASQUE 是 IP 隧道, 必须先把域名解析成 IP。
-    # 默认用本机 DNS 解析, 而国内 DNS 对 google.com 返回的是投毒结果,
-    # 于是会拿着假 IP 去连接并超时。开启 remote-dns-resolve 后,
-    # 域名会在隧道内部用 Cloudflare DNS 解析, 绕开投毒。
-    remote-dns-resolve: true
-    dns: [1.1.1.1, 1.0.0.1]
-    handshake-timeout: 30
-
-  # MASQUE over HTTP/2，QUIC 被限速时的备选
-  - name: "WARP-MASQUE-H2"
-    type: masque
-    server: 162.159.198.2
-    port: 443
-    network: h2
-    private-key: "MHcCAQEEICNuogZpRAGOIdRovpXVnGaqEvaGMVNLY5cFr+hHMFWaoAoGCCqGSM49AwEHoUQDQgAEW2PsopfHcYM/79jTJdLU3jifqq0CdQkCHns1YFBsc4J2r6EEsE3eotE3mAcGjgQ3IOLA7mQfb/R8dPnzonjEvw=="
-    public-key: "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEIaU7MToJm9NKp8YfGxR6r+/h4mcG7SxI8tsW8OR1A5tv/zCzVbCRRh2t87/kxnP6lAy0lkr7qYwu+ox+k3dr6w=="
-    ip: 172.16.0.2
-    ipv6: 2606:4700:110:881a:7805:d348:197:895c
-    mtu: 1280
-    udp: true
-    # 关键: MASQUE 是 IP 隧道, 必须先把域名解析成 IP。
-    # 默认用本机 DNS 解析, 而国内 DNS 对 google.com 返回的是投毒结果,
-    # 于是会拿着假 IP 去连接并超时。开启 remote-dns-resolve 后,
-    # 域名会在隧道内部用 Cloudflare DNS 解析, 绕开投毒。
+    # 关键：MASQUE 是 IP 隧道，必须先把域名解析成 IP。
+    # 默认用本机 DNS 解析，国内 DNS 对 google.com 返回投毒结果，
+    # 于是拿着假 IP 去连接必然超时。开启后域名在隧道内用 1.1.1.1 解析。
     remote-dns-resolve: true
     dns: [1.1.1.1, 1.0.0.1]
     handshake-timeout: 30
@@ -126,40 +92,38 @@ proxies:
 proxy-groups:
   - name: PROXY
     type: select
-    proxies: ["自动选择", "WARP-MASQUE", "WARP-WireGuard", "故障转移", DIRECT]
+    proxies: ["自动选择", "WARP-MASQUE", "WARP-WireGuard"]
 
-  # 自动挑延迟最低的可用节点；MASQUE 放前面，网络封 2408 时它会胜出
+  # 自动挑延迟最低的可用节点。刻意不放 DIRECT: 失败就失败，不泄漏。
   - name: 自动选择
     type: url-test
     url: https://www.gstatic.com/generate_204
     interval: 300
     tolerance: 150
     timeout: 10000
-    proxies: ["WARP-MASQUE", "WARP-WireGuard", "WARP-MASQUE-H2", "WARP-WireGuard-备"]
+    proxies: ["WARP-MASQUE", "WARP-WireGuard"]
 
-  # 依次尝试，全挂则退回直连
+  # 依次尝试，全部失败则断网（不退回直连）
   - name: 故障转移
     type: fallback
     url: https://www.gstatic.com/generate_204
     interval: 300
     timeout: 10000
-    proxies: ["WARP-MASQUE", "WARP-WireGuard", "WARP-MASQUE-H2", "WARP-WireGuard-备", DIRECT]
+    proxies: ["WARP-MASQUE", "WARP-WireGuard"]
 
   - name: AI
     type: select
-    proxies: ["自动选择", PROXY, DIRECT]
+    proxies: ["自动选择", PROXY]
 
   - name: 广告拦截
     type: select
-    proxies: [REJECT, DIRECT]
+    proxies: [REJECT]
 
-# ---------- 分流规则 ----------
+# ---------- 规则 ----------
 rules:
-  # ---- WebRTC / STUN 封堵（放在最前，优先级最高）----
-  # 原理: STUN 是 WebRTC 用来发现公网 IP 的协议, 走 UDP。
-  # 手机上 FlClash 用 VpnService 接管全部流量, 所以用端口规则
-  # 就能把这些流量强制塞进隧道, 网页拿到的将是 WARP 的出口 IP。
-  # 注意: 只封端口, 不影响国内网站的访问速度。
+  # ---- 1. WebRTC / STUN 封堵（最高优先级）----
+  # STUN 用 UDP 发现公网 IP。手机端 TUN 能看到这些包，
+  # 用端口规则强制塞进隧道，网页拿到的就是 WARP 的出口 IP。
   - DST-PORT,3478,PROXY
   - DST-PORT,5349,PROXY
   - DST-PORT,19302,PROXY
@@ -167,19 +131,26 @@ rules:
   - DST-PORT,19307,PROXY
   - DST-PORT,19308,PROXY
   - DST-PORT,19309,PROXY
+  # 常见 WebRTC 媒体端口段（仅在命中时才走代理，不影响其它流量）
+  - DST-PORT,50000-50100,PROXY
 
+  # ---- 2. 局域网/本机：必须直连（这些地址本来就不出公网）----
+  - IP-CIDR,127.0.0.0/8,DIRECT,no-resolve
+  - IP-CIDR,10.0.0.0/8,DIRECT,no-resolve
+  - IP-CIDR,172.16.0.0/12,DIRECT,no-resolve
+  - IP-CIDR,192.168.0.0/16,DIRECT,no-resolve
+  - IP-CIDR,169.254.0.0/16,DIRECT,no-resolve
+  - IP-CIDR6,::1/128,DIRECT,no-resolve
+  - IP-CIDR6,fc00::/7,DIRECT,no-resolve
+  - IP-CIDR6,fe80::/10,DIRECT,no-resolve
+
+  # ---- 3. 广告拦截 ----
   - GEOSITE,category-ads-all,广告拦截
-  - GEOIP,private,DIRECT,no-resolve
-  - GEOSITE,openai,AI
-  - GEOSITE,anthropic,AI
-  - GEOSITE,google-gemini,AI
-  - GEOSITE,category-ai-!cn,AI
-  - GEOSITE,github,PROXY
-  - GEOSITE,gfw,PROXY
-  - GEOSITE,geolocation-!cn,PROXY
-  - GEOSITE,cn,DIRECT
-  - GEOSITE,private,DIRECT
-  - GEOIP,CN,DIRECT
+
+  # ---- 4. 其余全部走 WARP（全隧道）----
+  # 如需恢复国内直连速度，取消下面两行注释即可（会暴露真实 IP）
+  # - GEOSITE,cn,DIRECT
+  # - GEOIP,CN,DIRECT
   - MATCH,PROXY
 
 # ---------- 规则数据 ----------
