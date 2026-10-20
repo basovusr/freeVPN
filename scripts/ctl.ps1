@@ -47,6 +47,11 @@ $Mirror    = 'https://ghproxy.net'
 $TaskName  = 'DSH-LocalProxy'
 $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 
+# 隧道连续运行超过这个小时数就自动重启。
+# 实测: usque 长跑 4 天后 gVisor 网络栈降级(日志大量 Martian packet dropped),
+# mihomo 经它发出的连接全部 context deadline exceeded。重启即恢复。
+$WarpMaxHours = 24
+
 function Write-File($Path, $Text) { [System.IO.File]::WriteAllText($Path, $Text, $Utf8NoBom) }
 function Read-File($Path) { [System.IO.File]::ReadAllText($Path, [System.Text.Encoding]::UTF8) }
 function Head($m) {
@@ -607,6 +612,18 @@ function Get-UsqueExe {
   return $null
 }
 
+function Test-WarpStale {
+  # 返回 @{ Running=bool; Stale=bool; Hours=double }
+  $p = Get-Process -Name 'usque' -ErrorAction SilentlyContinue | Select-Object -First 1
+  if (-not $p) { return @{ Running = $false; Stale = $false; Hours = 0.0 } }
+  try {
+    $h = ((Get-Date) - $p.StartTime).TotalHours
+    return @{ Running = $true; Stale = ($h -ge $WarpMaxHours); Hours = $h }
+  } catch {
+    return @{ Running = $true; Stale = $false; Hours = 0.0 }
+  }
+}
+
 function Test-WarpRunning {
   $c = Get-NetTCPConnection -LocalPort 1080 -State Listen -ErrorAction SilentlyContinue
   return [bool]$c
@@ -649,6 +666,12 @@ function Action-WarpStatus {
     } catch { }
   } else {
     Warn '账号未注册 -> .\ctl.ps1 -Action WarpRegister'
+  }
+  $st = Test-WarpStale
+  if ($st.Running) {
+    $warnStale = ''
+    if ($st.Stale) { $warnStale = '  <== 超过阈值，下次 Start 会自动重启' }
+    Info ('已运行 {0:N1} 小时（阈值 {1} 小时）{2}' -f $st.Hours, $WarpMaxHours, $warnStale)
   }
   if (Test-WarpRunning) {
     Ok '隧道运行中 (127.0.0.1:1080 SOCKS5)'
@@ -801,9 +824,18 @@ function Get-SystemProxyEnabled {
 }
 
 function Invoke-EnsureWarp {
-  # 让上游就绪：没装就装，没注册就注册，没跑就跑。
+  # 让上游就绪：没装就装，没注册就注册，没跑就跑，跑太久就重启。
   # 返回 $true 表示 1080 端口已在监听。
-  if (Test-WarpRunning) { Ok 'WARP 隧道已在运行'; return $true }
+  $st = Test-WarpStale
+  if ($st.Running -and $st.Stale) {
+    Warn ('WARP 隧道已连续运行 {0:N1} 小时（超过 {1} 小时的阈值），正在自动重启以恢复性能' -f $st.Hours, $WarpMaxHours)
+    Action-WarpStop
+    Start-Sleep -Seconds 1
+    # 继续走下面的启动流程
+  } elseif (Test-WarpRunning) {
+    Ok ('WARP 隧道已在运行（已运行 {0:N1} 小时）' -f $st.Hours)
+    return $true
+  }
 
   if (-not (Get-WarpDir)) {
     Warn '未检测到 WARP 组件，正在自动安装（首次约 5 MB）...'

@@ -348,4 +348,14 @@ Web 面板：<http://127.0.0.1:9090/ui>
 
 [MIT](LICENSE)
 basovusr
+## 隧道自动重启（长跑老化）
 
+实测发现：`usque` 的 MASQUE 隧道连续运行约 4 天后会老化 ——
+日志出现大量 `Martian packet dropped with loopback source address`，
+之后 mihomo 经它发出的连接全部 `context deadline exceeded`，
+表现为"国外网站突然打不开"，但直连测 SOCKS5 却是通的。
+
+因此 `ctl.ps1` 内置了看门狗：**每次 `-Action Start` 时检查隧道运行时长，
+超过 24 小时就自动重启**。阈值由脚本顶部的 `$WarpMaxHours` 控制。
+
+`-Action WarpStatus` 会显示当前已运行时长，超阈值时会标注提醒。

@@ -54,3 +54,11 @@ desktop.ini
 *.key
 *.pem
 .env
+# ---- 含真实凭据的本地配置（手机端配置已通过 phone/android.yaml 分发）----
+config/android.yaml
+
+# ---- 本地归档与备份 ----
+_archive/
+*.bak
+config/_wf_check.yml
+config/_*.yaml
