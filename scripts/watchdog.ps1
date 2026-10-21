@@ -59,12 +59,34 @@ function Get-UptimeHours {
   try { return ((Get-Date) - $p.StartTime).TotalHours } catch { return 0 }
 }
 
+function Invoke-CtlChild($action) {
+  # 关键：不能用管道(& ... | Out-Null)。
+  # ctl.ps1 -Action WarpStart 会启动 usque 这个长驻进程，它继承管道写端，
+  # 子进程退出后管道仍被 usque 持有，Out-Null 永远等不到 EOF ->
+  # 看门狗死锁，之后再也不会探测(实测卡死 2 小时)。
+  # 改用 Start-Process 重定向到文件 + 带超时的等待，彻底避开管道。
+  $o = Join-Path $LogDir 'wd_child.log'
+  $e = Join-Path $LogDir 'wd_child.err.log'
+  try {
+    $p = Start-Process -FilePath 'powershell' `
+         -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $Ctl, '-Action', $action) `
+         -WindowStyle Hidden -PassThru `
+         -RedirectStandardOutput $o -RedirectStandardError $e
+    if (-not $p.WaitForExit(150000)) {
+      Log ('子进程 ' + $action + ' 超时(150s)，强制结束')
+      try { $p.Kill() } catch { }
+    }
+  } catch {
+    Log ('子进程 ' + $action + ' 启动失败: ' + $_.Exception.Message)
+  }
+}
+
 function Restart-Tunnel($reason) {
   Log ('RESTART: ' + $reason)
   try {
-    & powershell -NoProfile -ExecutionPolicy Bypass -File $Ctl -Action WarpStop 2>&1 | Out-Null
+    Invoke-CtlChild 'WarpStop'
     Start-Sleep -Seconds 2
-    & powershell -NoProfile -ExecutionPolicy Bypass -File $Ctl -Action WarpStart 2>&1 | Out-Null
+    Invoke-CtlChild 'WarpStart'
     # 实测 MASQUE 建连 + 预热需要 15~25 秒，8 秒会误判为失败
     Log '等待隧道预热(最多 40 秒)...'
     $deadline = (Get-Date).AddSeconds(40)
