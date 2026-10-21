@@ -350,12 +350,17 @@ Web 面板：<http://127.0.0.1:9090/ui>
 basovusr
 ## 隧道自动重启（长跑老化）
 
-实测发现：`usque` 的 MASQUE 隧道连续运行约 4 天后会老化 ——
-日志出现大量 `Martian packet dropped with loopback source address`，
-之后 mihomo 经它发出的连接全部 `context deadline exceeded`，
-表现为"国外网站突然打不开"，但直连测 SOCKS5 却是通的。
+实测：`usque` 的 MASQUE 隧道连续运行约 **21 小时**后会失效。
+更麻烦的是它**自带的自动重连只重建了 QUIC 连接**
+（日志写 `Connected to MASQUE server`），数据面仍然是死的，
+此时 SOCKS5 请求全部 30 秒超时 —— 表现为"能连上但网页打不开"。
 
-因此 `ctl.ps1` 内置了看门狗：**每次 `-Action Start` 时检查隧道运行时长，
-超过 24 小时就自动重启**。阈值由脚本顶部的 `$WarpMaxHours` 控制。
+两层防护：
 
-`-Action WarpStatus` 会显示当前已运行时长，超阈值时会标注提醒。
+| 机制 | 位置 | 行为 |
+| --- | --- | --- |
+| **后台看门狗** | `scripts/watchdog.ps1`，`-Action Start` 自动拉起 | 每 5 分钟探测；连续 3 次失败或运行超 8 小时就重启隧道 |
+| **启动时检查** | `ctl.ps1` 的 `Invoke-EnsureWarp` | 运行超过 `$WarpMaxHours`（默认 8）小时则先重启 |
+
+看门狗日志：`logs/watchdog.log`。`-Action Stop` 会一并停止它。
+阈值可在 `ctl.ps1` 的 `$WarpMaxHours` 和 `watchdog.ps1` 的 `-MaxHours` 调整。

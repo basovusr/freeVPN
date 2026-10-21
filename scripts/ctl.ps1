@@ -48,9 +48,10 @@ $TaskName  = 'DSH-LocalProxy'
 $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 
 # 隧道连续运行超过这个小时数就自动重启。
-# 实测: usque 长跑 4 天后 gVisor 网络栈降级(日志大量 Martian packet dropped),
-# mihomo 经它发出的连接全部 context deadline exceeded。重启即恢复。
-$WarpMaxHours = 24
+# 实测: 隧道在连续运行 20.8 小时时失效, 且自带的自动重连只重建了 QUIC
+# 连接(日志写 Connected to MASQUE server), 数据面仍然是死的。
+# 所以阈值取 8 小时, 远早于实测失效点。
+$WarpMaxHours = 8
 
 function Write-File($Path, $Text) { [System.IO.File]::WriteAllText($Path, $Text, $Utf8NoBom) }
 function Read-File($Path) { [System.IO.File]::ReadAllText($Path, [System.Text.Encoding]::UTF8) }
@@ -409,6 +410,7 @@ function Action-Start {
     return
   }
   Ok ('代理已就绪: 127.0.0.1:' + $MixedPort + ' (HTTP + SOCKS5)')
+  Invoke-EnsureWatchdog
   Head '连通性自检'
   Test-Egress
 
@@ -449,6 +451,7 @@ function Action-Stop {
       Ok ('已结束 PID ' + $_.Id)
     } catch { Err ('无法结束 PID ' + $_.Id) }
   }
+  Stop-Watchdog
   Remove-Item $PidFile -Force -ErrorAction SilentlyContinue
   if ($killed -eq 0) { Info '没有正在运行的代理进程' }
   Start-Sleep -Milliseconds 500
@@ -860,6 +863,43 @@ function Invoke-EnsureWarp {
 
   Action-WarpStart
   return (Test-WarpRunning)
+}
+
+function Invoke-EnsureWatchdog {
+  # 启动后台健康检查（单实例）。它每隔 5 分钟探一次隧道，
+  # 连续失败或运行超时都会自动重启 usque。
+  $wd = Join-Path $PSScriptRoot 'watchdog.ps1'
+  if (-not (Test-Path $wd)) { Warn 'watchdog.ps1 不存在，跳过后台健康检查'; return }
+
+  $pidf = Join-Path $LogDir 'watchdog.pid'
+  if (Test-Path $pidf) {
+    $old = 0
+    try { $old = [int]((Get-Content $pidf -Raw -ErrorAction Stop).Trim()) } catch { }
+    if ($old -gt 0 -and (Get-Process -Id $old -ErrorAction SilentlyContinue)) {
+      Ok ('后台健康检查已在运行 (PID ' + $old + ')')
+      return
+    }
+  }
+
+  try {
+    $p = Start-Process -FilePath 'powershell' `
+         -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $wd) `
+         -WindowStyle Hidden -PassThru
+    Ok ('后台健康检查已启动 (PID ' + $p.Id + ')，每 5 分钟检查一次隧道')
+  } catch {
+    Warn ('后台健康检查启动失败: ' + $_.Exception.Message)
+  }
+}
+
+function Stop-Watchdog {
+  $pidf = Join-Path $LogDir 'watchdog.pid'
+  if (-not (Test-Path $pidf)) { return }
+  $old = 0
+  try { $old = [int]((Get-Content $pidf -Raw -ErrorAction Stop).Trim()) } catch { }
+  if ($old -gt 0) {
+    try { Stop-Process -Id $old -Force -ErrorAction Stop; Ok ('已停止后台健康检查 (PID ' + $old + ')') } catch { }
+  }
+  Remove-Item $pidf -Force -ErrorAction SilentlyContinue
 }
 
 switch ($Action) {
