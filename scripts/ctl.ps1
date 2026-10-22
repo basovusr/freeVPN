@@ -376,6 +376,13 @@ function Action-Start {
 
   if (-not $useTask) {
     $args = @('-d', $BinDir, '-f', $cfg)
+    # 轮转上一轮日志：RedirectStandardOutput 会直接覆盖文件，
+    # 实测 10-22 那次故障的证据因此全部丢失，无从排查。
+    foreach ($lf in @($LogFile, $ErrLog)) {
+      if (Test-Path $lf) {
+        try { Copy-Item $lf ($lf -replace '\.log$', '.prev.log') -Force } catch { }
+      }
+    }
     $p = Start-Process -FilePath $Core -ArgumentList $args -WorkingDirectory $BinDir `
          -WindowStyle Hidden -PassThru `
          -RedirectStandardOutput $LogFile -RedirectStandardError $ErrLog
@@ -759,6 +766,10 @@ function Action-WarpStart {
   $elog = Join-Path $LogDir 'warp.err.log'
   $a = @('socks', '-b', '127.0.0.1', '-p', '1080', '-P', '443',
          '-s', 'consumer-masque.cloudflareclient.com', '--always-reconnect')
+  # 同样轮转 usque 的日志
+  if (Test-Path $elog) {
+    try { Copy-Item $elog ($elog -replace '\.log$', '.prev.log') -Force } catch { }
+  }
   $p = Start-Process -FilePath (Get-UsqueExe -Dir $d) -ArgumentList $a `
        -WorkingDirectory $d -WindowStyle Hidden -PassThru `
        -RedirectStandardOutput (Join-Path $LogDir 'warp.log') -RedirectStandardError $elog
@@ -793,15 +804,30 @@ function Action-WarpStop {
 }
 
 function Test-ProxyEgress {
-  # 端到端探测：经 7890 混合端口访问 Google。
+  # 端到端探测：经 7890 混合端口访问外网。
   # 用于「熔断保护」——探测不过就不开系统代理，避免把对方的浏览器搞坏。
-  param([int]$TimeoutSec = 18)
-  try {
-    $r = & curl.exe -s -o NUL -x 'http://127.0.0.1:7890' `
-         -w '%{http_code}' --max-time $TimeoutSec `
-         'https://www.google.com/generate_204' 2>$null
-    return ($r -in @('200', '204', '301', '302'))
-  } catch { return $false }
+  #
+  # 为什么要多轮多目标:
+  #   免费 WARP 有 10~30% 的瞬时失败率。原来只做 1 次尝试、1 个目标，
+  #   实测 10-22 自检四个站点全通，紧接着这次探测却失败，
+  #   于是熔断把系统代理关掉 —— 浏览器反而完全不能上网。
+  #   现在每轮试 2 个目标、最多 3 轮，任一成功即判定可用。
+  param([int]$TimeoutSec = 12, [int]$Attempts = 3)
+  $urls = @(
+    'https://www.google.com/generate_204',
+    'https://www.gstatic.com/generate_204'
+  )
+  for ($i = 1; $i -le $Attempts; $i++) {
+    foreach ($u in $urls) {
+      try {
+        $r = & curl.exe -s -o NUL -x 'http://127.0.0.1:7890' `
+             -w '%{http_code}' --max-time $TimeoutSec $u 2>$null
+        if ($r -in @('200', '204', '301', '302')) { return $true }
+      } catch { }
+    }
+    if ($i -lt $Attempts) { Start-Sleep -Milliseconds 800 }
+  }
+  return $false
 }
 
 function Invoke-SetSystemProxy {

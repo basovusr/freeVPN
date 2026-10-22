@@ -25,7 +25,8 @@ param(
   [int]$IntervalSec  = 300,   # 探查间隔(秒)
   [int]$MaxFails     = 3,     # 连续失败几次触发重启
   [int]$ProbeTimeout = 12,    # 单次探测超时(秒)
-  [int]$MaxHours     = 8      # 隧道运行时长上限(小时)，超过就主动重启
+  [int]$MaxHours     = 8,     # 隧道运行时长上限(小时)，超过就主动重启
+  [int]$MixedPort    = 7890   # mihomo 的混合端口，也就是用户实际使用的入口
 )
 
 $ErrorActionPreference = 'Continue'
@@ -51,6 +52,46 @@ function Test-Tunnel {
          'https://www.gstatic.com/generate_204' 2>$null
     return ($r -in @('200', '204'))
   } catch { return $false }
+}
+
+function Test-Frontend {
+  # 用户实际使用的路径：经 mihomo 的混合端口访问外网。
+  # 之前只探测 usque(1080)，导致 mihomo 前端坏了却报告"一切正常" ——
+  # 实测 10-22 09:08~15:36 之间看门狗零失败日志，但用户无法上网。
+  try {
+    $r = & curl.exe -s -o NUL -x ('http://127.0.0.1:' + $MixedPort) -w '%{http_code}' --max-time $ProbeTimeout `
+         'https://www.gstatic.com/generate_204' 2>$null
+    return ($r -in @('200', '204'))
+  } catch { return $false }
+}
+
+function Get-SystemProxyEnabled {
+  try {
+    $v = (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings').ProxyEnable
+    return ($v -eq 1)
+  } catch { return $false }
+}
+
+function Restart-Frontend($reason) {
+  # 只重启 mihomo，不动看门狗自己。
+  # 调 ctl.ps1 -Action Start（不是 Restart）：Start 里的 Invoke-EnsureWatchdog
+  # 会读 PID 文件发现本实例还活着，于是跳过，不会把自己杀掉。
+  Log ('RESTART-FRONTEND: ' + $reason)
+  try {
+    Get-Process -Name 'mihomo' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 2
+    Invoke-CtlChild 'Start'
+    Start-Sleep -Seconds 3
+    if (Test-Frontend) {
+      Log 'RESTART-FRONTEND OK: 前端已恢复'
+      return $true
+    }
+    Log 'RESTART-FRONTEND FAILED: 重启后前端仍不通'
+    return $false
+  } catch {
+    Log ('RESTART-FRONTEND ERROR: ' + $_.Exception.Message)
+    return $false
+  }
 }
 
 function Get-UptimeHours {
@@ -123,11 +164,18 @@ if (Test-Path $PidFile) {
 Log ('watchdog 启动 PID=' + $PID + '  间隔=' + $IntervalSec + 's  失败阈值=' + $MaxFails + '  时长上限=' + $MaxHours + 'h')
 
 $fails = 0
+$frontFails = 0
+$proxyOffCount = 0
 while ($true) {
-  # mihomo 不在了就没必要继续
+  # mihomo 是用户实际使用的入口。它挂了不能退出，要负责拉起。
+  # (早期版本这里直接 break，导致前端崩溃时看门狗自己先退出，
+  #  永远不会重启 mihomo —— 实测 10-22 复现。)
   if (-not (Get-Process -Name 'mihomo' -ErrorAction SilentlyContinue)) {
-    Log 'mihomo 已退出，watchdog 结束'
-    break
+    Log 'mihomo 进程不存在，尝试重启前端'
+    Restart-Frontend 'mihomo 进程已消失' | Out-Null
+    $frontFails = 0
+    Start-Sleep -Seconds $IntervalSec
+    continue
   }
 
   $up = Get-UptimeHours
@@ -136,20 +184,52 @@ while ($true) {
   if ($up -ge $MaxHours) {
     Restart-Tunnel ('运行 ' + [math]::Round($up, 1) + ' 小时，超过上限 ' + $MaxHours + ' 小时') | Out-Null
     $fails = 0
+    $frontFails = 0
     Start-Sleep -Seconds $IntervalSec
     continue
   }
 
-  # 2) 数据面探测
-  if (Test-Tunnel) {
-    if ($fails -gt 0) { Log ('探测恢复，失败计数清零 (之前 ' + $fails + ' 次)') }
+  # 2) 隧道数据面（usque SOCKS5 1080）
+  $tunOk = Test-Tunnel
+  if ($tunOk) {
+    if ($fails -gt 0) { Log ('隧道探测恢复，失败计数清零 (之前 ' + $fails + ' 次)') }
     $fails = 0
   } else {
     $fails++
-    Log ('探测失败 ' + $fails + '/' + $MaxFails + '（隧道运行 ' + [math]::Round($up, 1) + 'h）')
+    Log ('隧道探测失败 ' + $fails + '/' + $MaxFails + '（隧道运行 ' + [math]::Round($up, 1) + 'h）')
     if ($fails -ge $MaxFails) {
-      Restart-Tunnel ('连续 ' + $fails + ' 次探测失败') | Out-Null
+      Restart-Tunnel ('连续 ' + $fails + ' 次隧道探测失败') | Out-Null
       $fails = 0
+    }
+  }
+
+  # 3) 用户实际路径（mihomo 7890）。这一层之前完全没覆盖。
+  if (Test-Frontend) {
+    if ($frontFails -gt 0) { Log ('前端探测恢复，失败计数清零 (之前 ' + $frontFails + ' 次)') }
+    $frontFails = 0
+    # 连续 2 次都关闭才提醒：启动瞬间 ctl.ps1 可能还没走到开启系统代理那一步，
+    # 单次检查会误报（实测 10-22 启动后就误报过一次）。
+    if (Get-SystemProxyEnabled) {
+      $proxyOffCount = 0
+    } else {
+      $proxyOffCount++
+      if ($proxyOffCount -ge 2) {
+        Log '提醒: 系统代理持续为【关闭】，浏览器不会走代理。若不是你主动关的，运行 系统代理开关.bat 选[1]开启'
+        $proxyOffCount = 0
+      }
+    }
+  } else {
+    $frontFails++
+    $tunTxt = '正常'
+    if (-not $tunOk) { $tunTxt = '也异常' }
+    Log ('前端探测失败 ' + $frontFails + '/' + $MaxFails + '（mihomo:' + $MixedPort + ' 不通，隧道' + $tunTxt + '）')
+    if ($frontFails -ge $MaxFails) {
+      if ($tunOk) {
+        Restart-Frontend '连续失败但隧道正常，判定 mihomo 前端故障' | Out-Null
+      } else {
+        Log '隧道同样不通，已在上一步处理，跳过前端重启'
+      }
+      $frontFails = 0
     }
   }
 
